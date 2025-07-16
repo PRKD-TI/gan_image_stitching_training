@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+# Arquivos jpg jpeg zip pt não devem entrar na lista de alterações/adições
+*.jpg
+*.jpeg
+*.zip
+*.pt
+
 # Distribution / packaging
 .Python
 build/

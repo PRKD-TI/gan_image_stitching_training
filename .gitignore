@@ -11,6 +11,10 @@ __pycache__/
 *.jpeg
 *.zip
 *.pt
+/logs
+/checkpoints_epoch
+/checkpoints_batch
+/runs
 
 # Distribution / packaging
 .Python

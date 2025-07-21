@@ -4,8 +4,10 @@ from torch.autograd import grad
 from pytorch_msssim import ssim, ms_ssim
 import lpips
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # LPIPS usa um modelo de rede para comparação perceptual
-lpips_fn = lpips.LPIPS(net='alex')
+lpips_fn = lpips.LPIPS(net='alex').to(device)
 
 
 from torchvision.utils import make_grid
@@ -123,18 +125,16 @@ def compute_all_metrics_old(fake, target):
     with torch.no_grad():
         lpips_vals = []
         for f, t in zip(fake, target):
-            lp = lpips_fn(f.unsqueeze(0), t.unsqueeze(0))
+            f = f.unsqueeze(0).to(device)
+            t = t.unsqueeze(0).to(device)
+            lp = lpips_fn(f, t)
             lpips_vals.append(lp.item())
         metrics['LPIPS'] = sum(lpips_vals) / len(lpips_vals)
-
+    
     # L1
     metrics['L1'] = F.l1_loss(fake, target).item()
 
     return metrics
-
-
-
-
 
 def compute_gradient_penalty(D, real_samples, fake_samples, device):
     """

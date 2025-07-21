@@ -15,6 +15,7 @@ __pycache__/
 /checkpoints_epoch
 /checkpoints_batch
 /runs
+colab_key*
 
 # Distribution / packaging
 .Python

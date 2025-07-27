@@ -9,6 +9,7 @@ __pycache__/
 # Arquivos jpg jpeg zip pt não devem entrar na lista de alterações/adições
 *.jpg
 *.jpeg
+*.png
 *.zip
 *.pt
 /logs

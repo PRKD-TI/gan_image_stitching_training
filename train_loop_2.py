@@ -1,6 +1,10 @@
+import re
+import random
+import numpy as np
 import os
 import time
 import torch
+import torchvision.utils as vutils
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
@@ -19,8 +23,43 @@ debug = 0
 # LPIPS usa um modelo de rede para comparação perceptual
 lpips_fn = lpips.LPIPS(net='alex')
 
-import os
-import re
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+def carregar_amostras_fixas(train_loader, caminho='fixed_samples.pt', device='cuda'):
+    if os.path.exists(caminho):
+        print(f'[INFO] Carregando amostras fixas de {caminho}')
+        fixed_samples = torch.load(caminho)
+    else:
+        print('[INFO] Selecionando novas amostras fixas...')
+        fixed_samples = []
+        for i, ((p1, p2), gt) in enumerate(train_loader):
+            if i >= 5:
+                break
+            fixed_samples.append(((p1[0].unsqueeze(0), p2[0].unsqueeze(0)), gt[0].unsqueeze(0)))
+        torch.save(fixed_samples, caminho)
+        print(f'[INFO] Amostras fixas salvas em {caminho}')
+    
+    # Envia pro device
+    fixed_samples = [((p1.to(device), p2.to(device)), gt.to(device)) for ((p1, p2), gt) in fixed_samples]
+    return fixed_samples
+
+def salvar_resultados_fixos(generator, fixed_samples, output_dir, step_tag):
+    generator.eval()
+    os.makedirs(output_dir, exist_ok=True)
+
+    with torch.no_grad():
+        for idx, ((p1, p2), gt) in enumerate(fixed_samples):
+            fake = generator(p1, p2)
+
+            # Concatena horizontalmente: parte1 | parte2 | fake | groundtruth
+            linha = torch.cat([p1, p2, fake, gt], dim=3)
+
+            vutils.save_image(linha, os.path.join(output_dir, f"sample_{idx+1}_{step_tag}.png"), normalize=True)
+    generator.train()
+
 
 def carregar_checkpoint_mais_recente(checkpoints_epoch_dir, checkpoints_batch_dir):
     """
@@ -64,14 +103,38 @@ def carregar_checkpoint_mais_recente(checkpoints_epoch_dir, checkpoints_batch_di
     epoch, batch, path = all_checkpoints[-1]
     return path, epoch, batch
 
+from torchvision.models import vgg16
+import torch.nn.functional as F
+
+class VGGPerceptualLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        vgg = vgg16(pretrained=True).features[:16]  # até conv3_3
+        self.vgg = vgg.eval()
+        for param in self.vgg.parameters():
+            param.requires_grad = False
+
+    def forward(self, input, target):
+        input_vgg = self.vgg(input)
+        target_vgg = self.vgg(target)
+        return F.l1_loss(input_vgg, target_vgg)
 
 
 def train(
     generator, discriminator, dataloader, device, epochs,
     save_every, checkpoint_dir, checkpoint_batch_dir,
     tensorboard_dir, metrics, lr_g=2e-4, lr_d=2e-4,
-    lr_min=1e-6, gen_steps_per_batch=1
+    lr_min=1e-6, gen_steps_per_batch=1,
+    fixeSampleTime=5  # minutos
 ):
+
+    # Carregar amostras fixas para comparação entre os batches
+    from datetime import datetime, timedelta
+    set_seed(42)
+    fixed_samples = carregar_amostras_fixas(dataloader, caminho='fixed_samples.pt', device=device)
+    last_fixed_sample_time = datetime.now()
+
+
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(checkpoint_batch_dir, exist_ok=True)
     writer = SummaryWriter(tensorboard_dir)
@@ -110,6 +173,23 @@ def train(
     last_checkpoint_time = time.time()
 
     for epoch in range(start_epoch, epochs):
+        total_loss_G = 0.0
+        total_loss_D = 0.0
+        total_metrics = {
+            k: 0.0 for k in [
+                'PSNR',
+                'SSIM',
+                'MS-SSIM',
+                'LPIPS',
+                'L1',
+                'CPU_Usage_%',
+                'RAM_Usage_MB',
+                'GPU_Usage_%',
+                'GPU_Memory_MB',
+            ]
+        }
+        count = 0
+
         pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch+1}/{epochs}")
         for i, ((part1, part2), target) in pbar:
 
@@ -153,14 +233,24 @@ def train(
                 "loss_D": f"{loss_D.item():.4f}"
             })
 
-            writer.add_scalar("Loss/Generator", loss_G.item(), epoch * len(dataloader) + i)
-            writer.add_scalar("Loss/Discriminator", loss_D.item(), epoch * len(dataloader) + i)
+            step = epoch * len(dataloader) + i
+            writer.add_scalar("Loss/Generator", loss_G.item(), step)
+            writer.add_scalar("Loss/Discriminator", loss_D.item(), step)
+            total_loss_G += loss_G.item()
+            total_loss_D += loss_D.item()
+            count += 1
 
             with torch.no_grad():
-                eval_metrics = compute_all_metrics(fake, target, part1, part2, writer, epoch * len(dataloader) + i)
+                eval_metrics = compute_all_metrics(fake, target, part1, part2, writer, step)
                 for k, v in eval_metrics.items():
                     if v is not None:
                         writer.add_scalar(f"Metrics/{k}", v, epoch * len(dataloader) + i)
+                        total_metrics[k] += v
+                        
+
+            if datetime.now() - last_fixed_sample_time >= timedelta(minutes=fixeSampleTime):
+                salvar_resultados_fixos(generator, fixed_samples, output_dir='./fixed_samples', step_tag=f"{epoch}_{epoch * len(dataloader) + i}")
+                last_fixed_sample_time = datetime.now()
 
             # Checkpoint a cada 10 minutos
             if time.time() - last_checkpoint_time > 600:
@@ -173,6 +263,14 @@ def train(
                     'optimizer_D_state_dict': optimizer_D.state_dict(),
                 }, os.path.join(checkpoint_batch_dir, f'checkpoint_epoch{epoch}_batch{i}.pt'))
                 last_checkpoint_time = time.time()
+
+        # Salvar médias da época no TensorBoard
+        writer.add_scalar("Epoch/Loss_Generator", total_loss_G / count, epoch)
+        writer.add_scalar("Epoch/Loss_Discriminator", total_loss_D / count, epoch)
+
+        for k, v in total_metrics.items():
+            if v is not None:
+                writer.add_scalar(f"Metrics/{k}", v/count, epoch)
 
         # Fim da época: salvar checkpoint principal
         torch.save({
@@ -187,3 +285,4 @@ def train(
         scheduler_D.step()
 
     writer.close()
+

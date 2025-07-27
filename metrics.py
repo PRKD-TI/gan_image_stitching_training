@@ -3,30 +3,27 @@ import torch.nn.functional as F
 from torch.autograd import grad
 from pytorch_msssim import ssim, ms_ssim
 import lpips
+import psutil
+import pynvml
+from torchvision.utils import make_grid
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# LPIPS usa um modelo de rede para comparação perceptual
 lpips_fn = lpips.LPIPS(net='alex').to(device)
 
+# Inicializa NVML para monitoramento de GPU
+try:
+    pynvml.nvmlInit()
+    gpu_available = True
+    handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # GPU 0
+except:
+    gpu_available = False
 
-from torchvision.utils import make_grid
 
 def compute_all_metrics(fake, target, part1=None, part2=None, writer=None, step=None):
     """
-    Calcula métricas e registra imagens no TensorBoard como concatenação: parte1 | parte2 | fake | groundtruth
-
-    Parâmetros:
-        fake (Tensor): Imagem gerada (N, C, H, W) [0,1] ou [-1,1]
-        target (Tensor): Ground truth (N, C, H, W)
-        part1, part2 (Tensor): Entradas (N, C, H, W) opcionais
-        writer (SummaryWriter): TensorBoard writer opcional
-        step (int): Etapa global (epoch * len(loader) + i)
-
-    Retorna:
-        dict com métricas
+    Calcula métricas de imagem e uso de recursos, e registra imagens no TensorBoard.
     """
-    # Normaliza para [0, 1] se estiverem em [-1, 1]
+    # Normaliza imagens
     if fake.min() < 0:
         fake = (fake + 1) / 2
         target = (target + 1) / 2
@@ -54,9 +51,9 @@ def compute_all_metrics(fake, target, part1=None, part2=None, writer=None, step=
             metrics['MS-SSIM'] = ms_ssim_val.item()
         except Exception as e:
             print(f"[AVISO] Falha ao calcular MS-SSIM: {e}")
-            metrics['MS-SSIM'] = None
+            metrics['MS-SSIM'] = 0
     else:
-        metrics['MS-SSIM'] = None
+        metrics['MS-SSIM'] = 0
 
     # LPIPS
     with torch.no_grad():
@@ -69,16 +66,38 @@ def compute_all_metrics(fake, target, part1=None, part2=None, writer=None, step=
     # L1
     metrics['L1'] = F.l1_loss(fake, target).item()
 
-    # TensorBoard: loga imagem combinada por amostra
+    # 🔍 Uso de recursos do sistema
+    metrics['CPU_Usage_%'] = psutil.cpu_percent(interval=None)
+    metrics['RAM_Usage_MB'] = psutil.virtual_memory().used / (1024 ** 2)
+
+    if gpu_available and device.type == "cuda":
+        try:
+            meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            metrics['GPU_Usage_%'] = util.gpu
+            metrics['GPU_Memory_MB'] = meminfo.used / (1024 ** 2)
+        except Exception as e:
+            print(f"[AVISO] Erro ao coletar estatísticas da GPU: {e}")
+            metrics['GPU_Usage_%'] = None
+            metrics['GPU_Memory_MB'] = None
+    else:
+        metrics['GPU_Usage_%'] = None
+        metrics['GPU_Memory_MB'] = None
+
+    # 📊 Log de imagens no TensorBoard
     if writer is not None and step is not None and part1 is not None and part2 is not None:
-        # Seleciona primeiras 4 amostras
         num_samples = min(4, fake.shape[0])
         rows = []
         for i in range(num_samples):
-            row = torch.cat([part1[i], part2[i], fake[i], target[i]], dim=2)  # concat horiz
+            row = torch.cat([part1[i], part2[i], fake[i], target[i]], dim=2)
             rows.append(row)
-        grid = make_grid(rows, nrow=1, normalize=True, value_range=(0, 1))  # uma linha vertical
+        grid = make_grid(rows, nrow=1, normalize=True, value_range=(0, 1))
         writer.add_image("Samples/Concat_part1_part2_fake_gt", grid, global_step=step)
+
+        # Também adiciona as métricas no TensorBoard
+        for key, value in metrics.items():
+            if isinstance(value, (float, int)) and value is not None:
+                writer.add_scalar(f"Metrics/{key}", value, global_step=step)
 
     return metrics
 

@@ -1,0 +1,23 @@
+name: ImageStitching
+channels:
+  - defaults
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pip
+  - numpy
+  - matplotlib
+  - tqdm
+  - scikit-image
+  - pillow
+  - scipy
+  - seaborn
+  - pytorch
+  - torchvision
+  - tensorboard
+  - pip:
+      - opencv-python
+      - lpips
+      - pytorch-msssim
+      - tensorboardX

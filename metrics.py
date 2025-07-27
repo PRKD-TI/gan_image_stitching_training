@@ -14,7 +14,7 @@ from torchvision.utils import make_grid
 
 def compute_all_metrics(fake, target, part1=None, part2=None, writer=None, step=None):
     """
-    Calcula métricas e registra imagens no TensorBoard (opcionalmente).
+    Calcula métricas e registra imagens no TensorBoard como concatenação: parte1 | parte2 | fake | groundtruth
 
     Parâmetros:
         fake (Tensor): Imagem gerada (N, C, H, W) [0,1] ou [-1,1]
@@ -26,7 +26,7 @@ def compute_all_metrics(fake, target, part1=None, part2=None, writer=None, step=
     Retorna:
         dict com métricas
     """
-    # Garantir que estão no mesmo range [0, 1]
+    # Normaliza para [0, 1] se estiverem em [-1, 1]
     if fake.min() < 0:
         fake = (fake + 1) / 2
         target = (target + 1) / 2
@@ -56,7 +56,7 @@ def compute_all_metrics(fake, target, part1=None, part2=None, writer=None, step=
             print(f"[AVISO] Falha ao calcular MS-SSIM: {e}")
             metrics['MS-SSIM'] = None
     else:
-        metrics['MS-SSIM'] = None  # ou "Pequena" para indicar o motivo
+        metrics['MS-SSIM'] = None
 
     # LPIPS
     with torch.no_grad():
@@ -67,21 +67,21 @@ def compute_all_metrics(fake, target, part1=None, part2=None, writer=None, step=
         metrics['LPIPS'] = sum(lpips_vals) / len(lpips_vals)
 
     # L1
-    l1 = F.l1_loss(fake, target).item()
-    metrics['L1'] = l1
+    metrics['L1'] = F.l1_loss(fake, target).item()
 
-    # Adiciona imagens ao TensorBoard
-    if writer is not None and step is not None:
-        def log_image(tag, tensor):
-            grid = make_grid(tensor[:4], nrow=4, normalize=True, value_range=(0, 1))
-            writer.add_image(tag, grid, global_step=step)
-
-        log_image("Image/Part1", part1)
-        log_image("Image/Part2", part2)
-        log_image("Image/Fake", fake)
-        log_image("Image/Target", target)
+    # TensorBoard: loga imagem combinada por amostra
+    if writer is not None and step is not None and part1 is not None and part2 is not None:
+        # Seleciona primeiras 4 amostras
+        num_samples = min(4, fake.shape[0])
+        rows = []
+        for i in range(num_samples):
+            row = torch.cat([part1[i], part2[i], fake[i], target[i]], dim=2)  # concat horiz
+            rows.append(row)
+        grid = make_grid(rows, nrow=1, normalize=True, value_range=(0, 1))  # uma linha vertical
+        writer.add_image("Samples/Concat_part1_part2_fake_gt", grid, global_step=step)
 
     return metrics
+
 
 def compute_all_metrics_old(fake, target):
     """

@@ -1,10 +1,15 @@
+# Versão base do Python (não imposta diretamente por pip, mas é bom saber: 3.9)
+numpy
+matplotlib
+tqdm
+scikit-image
+pillow
+scipy
+seaborn
 torch
 torchvision
+tensorboard
 opencv-python
 lpips
 pytorch-msssim
-tensorboard
-matplotlib
-tqdm
-numpy
-scikit-image
+tensorboardX

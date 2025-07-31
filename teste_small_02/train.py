@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 
 # Dataset e dataloader
 from dataset import ImageStitchingDatasetFiles
-from extrair_zip_train_dir import descompactar_zip_com_progresso
+from utils_gan.extrair_zip_train_dir import descompactar_zip_com_progresso
 
 # Treinamento e checkpoint
 from train_loop_2 import train
@@ -14,7 +14,7 @@ from train_loop_2 import train
 # Modelos
 import gan_structure
 # from gan_structure import DualEncoderUNet_CBAM_SA_Small, PatchDiscriminator
-from gan_structure_deep import DualEncoderUNet_CBAM_SA_Deep, PatchDiscriminator # A partir da época 9
+from gan_structure_2 import DualEncoderUNet_CBAM_SA_Small, PatchDiscriminator # A partir da época 9
 
 
 
@@ -30,7 +30,7 @@ def main():
     dataset = ImageStitchingDatasetFiles("./train", use_gradiente=False)
     dataloader = DataLoader(
         dataset,
-        batch_size=32,
+        batch_size=128,
         shuffle=True,
         num_workers=4,
         prefetch_factor=2,
@@ -41,7 +41,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Instanciar modelos
-    generator = DualEncoderUNet_CBAM_SA_Deep().to(device)
+    generator = DualEncoderUNet_CBAM_SA_Small().to(device)
     discriminator = PatchDiscriminator().to(device)
 
     # Treinamento

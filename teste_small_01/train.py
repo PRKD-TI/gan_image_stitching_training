@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 
 # Dataset e dataloader
 from dataset import ImageStitchingDatasetFiles
-from extrair_zip_train_dir import descompactar_zip_com_progresso
+from utils_gan.extrair_zip_train_dir import descompactar_zip_com_progresso
 
 # Treinamento e checkpoint
 from train_loop_2 import train

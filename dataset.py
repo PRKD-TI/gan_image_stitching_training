@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from pathlib import Path
-import extrair_zip_train_dir as zipService
+import utils_gan.extrair_zip_train_dir as zipService
 
 
 class ImageStitchingDatasetFiles(Dataset):

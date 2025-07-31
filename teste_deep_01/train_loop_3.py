@@ -10,7 +10,10 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from pytorch_msssim import ssim, ms_ssim
 import lpips
-from metrics import compute_all_metrics  # Importa a função de métricas do arquivo metrics.py
+from torchvision.models import vgg16
+import torch.nn.functional as F
+
+from utils_gan.metrics import compute_all_metrics  # Importa a função de métricas do arquivo metrics.py
 # from gan_structure import DualEncoderUNet_CBAM_SA_Small, PatchDiscriminator  # Importa os modelos do arquivo gan-structure.py
 from gan_structure_2 import DualEncoderUNet_CBAM_SA_Small, PatchDiscriminator  # A partir da época 9
 
@@ -20,7 +23,18 @@ debug = 0
 # from generator import DualEncoderUNet_CBAM_SA_Small  # novo gerador com 2 encoders, CBAM e SelfAttention
 # from discriminator import PatchDiscriminator  # ou caminho equivalente
 
-# LPIPS usa um modelo de rede para comparação perceptual
+class VGGPerceptualLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        vgg = vgg16(weights='DEFAULT').features[:16]
+        self.vgg = vgg.eval()
+        for param in self.vgg.parameters():
+            param.requires_grad = False
+
+    def forward(self, input, target):
+        return F.l1_loss(self.vgg(input), self.vgg(target))
+
+# LPIPS usa um modelo de rede para comparação perceptual 
 lpips_fn = lpips.LPIPS(net='alex')
 
 def set_seed(seed=42):
@@ -28,7 +42,7 @@ def set_seed(seed=42):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def carregar_amostras_fixas(train_loader, caminho='fixed_samples.pt', device='cuda'):
+def carregar_amostras_fixas(train_loader, caminho='../fixed_samples.pt', device='cuda'):
     if os.path.exists(caminho):
         print(f'[INFO] Carregando amostras fixas de {caminho}')
         fixed_samples = torch.load(caminho)
@@ -103,35 +117,27 @@ def carregar_checkpoint_mais_recente(checkpoints_epoch_dir, checkpoints_batch_di
     epoch, batch, path = all_checkpoints[-1]
     return path, epoch, batch
 
-from torchvision.models import vgg16
-import torch.nn.functional as F
-
-class VGGPerceptualLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        vgg = vgg16(pretrained=True).features[:16]  # até conv3_3
-        self.vgg = vgg.eval()
-        for param in self.vgg.parameters():
-            param.requires_grad = False
-
-    def forward(self, input, target):
-        input_vgg = self.vgg(input)
-        target_vgg = self.vgg(target)
-        return F.l1_loss(input_vgg, target_vgg)
-
+def get_dynamic_gen_steps(loss_D, max_steps=5):
+    if loss_D > 1.0:
+        return max_steps
+    elif loss_D > 0.5:
+        return 3
+    elif loss_D > 0.2:
+        return 2
+    return 1
 
 def train(
     generator, discriminator, dataloader, device, epochs,
     save_every, checkpoint_dir, checkpoint_batch_dir,
     tensorboard_dir, metrics, lr_g=2e-4, lr_d=2e-4,
-    lr_min=1e-6, gen_steps_per_batch=1,
-    fixeSampleTime=5  # minutos
+    lr_min=1e-6, fixeSampleTime=5, vgg_weight=0.5,
+    gen_steps_mode='adaptive', max_gen_steps=5
 ):
 
     # Carregar amostras fixas para comparação entre os batches
     from datetime import datetime, timedelta
     set_seed(42)
-    fixed_samples = carregar_amostras_fixas(dataloader, caminho='fixed_samples.pt', device=device)
+    fixed_samples = carregar_amostras_fixas(dataloader, caminho='../fixed_samples.pt', device=device)
     last_fixed_sample_time = datetime.now()
 
 
@@ -142,26 +148,21 @@ def train(
     criterion_GAN = nn.BCEWithLogitsLoss()
     criterion_L1 = nn.L1Loss()
 
+    criterion_VGG = VGGPerceptualLoss().to(device)
     optimizer_G = torch.optim.Adam(generator.parameters(), lr=lr_g, betas=(0.5, 0.999))
     optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=lr_d, betas=(0.5, 0.999))
+    scheduler_G = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_G, T_max=20, eta_min=lr_min)
+    scheduler_D = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_D, T_max=20, eta_min=lr_min)
 
-    scheduler_G = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_G, T_max=epochs, eta_min=lr_min)
-    scheduler_D = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_D, T_max=epochs, eta_min=lr_min)
-
-    start_epoch = 0
-    # checkpoint_path = carregar_checkpoint_mais_recente(checkpoint_dir, checkpoint_batch_dir)
-    checkpoint_path, start_epoch, start_batch = carregar_checkpoint_mais_recente("checkpoints_epoch", "checkpoints_batch")
-
+    checkpoint_path, start_epoch, start_batch = carregar_checkpoint_mais_recente(checkpoint_dir, checkpoint_batch_dir)
+    print(f"[INFO] Carregando checkpoint: {checkpoint_path} (epoch={start_epoch}, batch={start_batch})")
     if checkpoint_path:
             checkpoint = torch.load(checkpoint_path)
-
             generator.load_state_dict(checkpoint['generator_state_dict'])
             discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
             optimizer_G.load_state_dict(checkpoint['optimizer_G_state_dict'])
             optimizer_D.load_state_dict(checkpoint['optimizer_D_state_dict'])
-            # ... quaisquer outras coisas
 
-            # ⚠️ Ajuste aqui: para continuar da mesma epoch
             # start_epoch permanece igual se batch != -1
             if start_batch == -1:
                 start_epoch += 1
@@ -197,9 +198,7 @@ def train(
             if epoch == start_epoch and i < start_batch:
                 continue
             
-            part1 = part1.to(device)
-            part2 = part2.to(device)
-            target = target.to(device)
+            part1, part2, target = part1.to(device), part2.to(device), target.to(device)
 
             real_input = torch.cat([part1, part2, target], dim=1)
             fake = generator(part1, part2)
@@ -216,15 +215,18 @@ def train(
             loss_D.backward()
             optimizer_D.step()
 
+            gen_steps = get_dynamic_gen_steps(loss_D.item(), max_gen_steps) if gen_steps_mode == 'adaptive' else gen_steps_mode
+
             # Train Generator
-            for _ in range(gen_steps_per_batch):
+            for _ in range(gen_steps):
                 fake = generator(part1, part2)
                 fake_input = torch.cat([part1, part2, fake], dim=1)
                 optimizer_G.zero_grad()
                 pred_fake = discriminator(fake_input)
                 loss_G_GAN = criterion_GAN(pred_fake, torch.ones_like(pred_fake))
                 loss_G_L1 = criterion_L1(fake, target)
-                loss_G = 8.0 * loss_G_GAN + 2.0 * loss_G_L1
+                loss_G_VGG = criterion_VGG(fake, target)
+                loss_G = 8.0 * loss_G_GAN + 2.0 * loss_G_L1 + vgg_weight * loss_G_VGG
                 loss_G.backward()
                 optimizer_G.step()
 
@@ -236,8 +238,10 @@ def train(
             step = epoch * len(dataloader) + i
             writer.add_scalar("Loss/Generator", loss_G.item(), step)
             writer.add_scalar("Loss/Discriminator", loss_D.item(), step)
+            writer.add_scalar("Loss/VGG", loss_G_VGG.item(), step)
             total_loss_G += loss_G.item()
             total_loss_D += loss_D.item()
+            total_loss_VGG += loss_G_VGG.item()
             count += 1
 
             with torch.no_grad():
@@ -267,6 +271,7 @@ def train(
         # Salvar médias da época no TensorBoard
         writer.add_scalar("Epoch/Loss_Generator", total_loss_G / count, epoch)
         writer.add_scalar("Epoch/Loss_Discriminator", total_loss_D / count, epoch)
+        writer.add_scalar("Epoch/Loss_VGG", total_loss_VGG / count, epoch)
 
         for k, v in total_metrics.items():
             if v is not None:
